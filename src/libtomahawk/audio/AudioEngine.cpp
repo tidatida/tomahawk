@@ -575,7 +575,7 @@ void
 AudioEngine::loadTrack( const Tomahawk::result_ptr& result, bool preload )
 {
     Q_D( AudioEngine );
-    tDebug( LOGEXTRA ) << Q_FUNC_INFO << ( result.isNull() ? QString() : result->url() );
+    tDebug( LOGEXTRA ) << Q_FUNC_INFO << ( result.isNull() ? QString() : result->url() ) << " preload:" << preload;
 
 
     if ( !d->audioOutput->isInitialized() )
@@ -588,6 +588,12 @@ AudioEngine::loadTrack( const Tomahawk::result_ptr& result, bool preload )
         stop();
         return;
     }
+
+    if (preload && d->preloadedTrack == result)
+        return;
+
+    if (preload) 
+    tDebug( LOGEXTRA ) << Q_FUNC_INFO << "not preloaded yet, preloading";
 
     if (preload) 
     {
@@ -605,9 +611,17 @@ AudioEngine::loadTrack( const Tomahawk::result_ptr& result, bool preload )
         setCurrentTrack( result );
         if ( result == d->preloadedTrack ) 
         {
+            setPreloadTrack( Tomahawk::result_ptr(nullptr) );
             d->state = Loading;
             emit loading( d->currentTrack );
             d->audioOutput->switchToPreloadedMedia();
+            if ( !d->input.isNull() )
+            {
+                d->input->close();
+                d->input.clear();
+            }
+            d->input = d->inputPreloaded;
+
             d->audioOutput->play();
 
             if ( TomahawkSettings::instance()->privateListeningMode() != TomahawkSettings::FullyPrivate )
@@ -618,12 +632,14 @@ AudioEngine::loadTrack( const Tomahawk::result_ptr& result, bool preload )
             sendNowPlayingNotification( Tomahawk::InfoSystem::InfoNowPlaying );
             return;
         }
+        setPreloadTrack( Tomahawk::result_ptr(nullptr) );
     }
 
     ScriptJob* job = result->resolvedBy()->getStreamUrl( result );
     connect( job, SIGNAL( done( QVariantMap ) ), SLOT( gotStreamUrl( QVariantMap ) ) );
     job->setProperty( "result", QVariant::fromValue( result ) );
     job->setProperty( "isPreload", QVariant::fromValue(preload) );
+    tDebug() << "preload:" << preload << ", for result:" << result;
     job->start();
 }
 
@@ -632,9 +648,11 @@ void
 AudioEngine::gotStreamUrl( const QVariantMap& data )
 {
     QString streamUrl = data[ "url" ].toString();
-    bool isPreload = data[ "isPreload" ].toBool();
     QVariantMap headers = data[ "headers" ].toMap();
     Tomahawk::result_ptr result = sender()->property( "result" ).value<result_ptr>();
+    bool isPreload = sender()->property( "isPreload" ).value<bool>();
+
+    tDebug() << Q_FUNC_INFO << " is preload:" << isPreload << ", for result:" << result;
 
     if ( streamUrl.isEmpty() || headers.isEmpty() ||
          !( TomahawkUtils::isHttpResult( streamUrl ) || TomahawkUtils::isHttpsResult( streamUrl ) ) )
@@ -686,6 +704,7 @@ AudioEngine::gotRedirectedStreamUrl( const Tomahawk::result_ptr& result, Network
     reply->deleteLater();
 
     bool isPreload = result == d->preloadedTrack;
+    tDebug() << Q_FUNC_INFO << " is preload:" << isPreload;
 
     performLoadTrack( result, url, sp, isPreload );
 }
@@ -694,6 +713,8 @@ AudioEngine::gotRedirectedStreamUrl( const Tomahawk::result_ptr& result, Network
 void
 AudioEngine::onPositionChanged( float new_position )
 {
+    if ( new_position >= 0.90 )
+        loadNextTrack(true);
 //    tDebug() << Q_FUNC_INFO << new_position << state();
     emit trackPosition( new_position );
 }
@@ -819,21 +840,31 @@ AudioEngine::performLoadTrack( const Tomahawk::result_ptr result, const QString&
                 d->audioOutput->setAutoDelete( true, preload );
             }
 
-            if ( !d->input.isNull() )
-            {
-                d->input->close();
-                d->input.clear();
+            if ( preload ) {
+                if ( !d->inputPreloaded.isNull() )
+                {
+                    d->inputPreloaded->close();
+                    d->inputPreloaded.clear();
+                }
+                d->inputPreloaded = ioToKeep;
             }
-            d->input = ioToKeep;
-            d->audioOutput->play();
-
-            if ( TomahawkSettings::instance()->privateListeningMode() != TomahawkSettings::FullyPrivate )
+            else
             {
-                d->currentTrack->track()->startPlaying();
-            }
+                if ( !d->input.isNull() )
+                {
+                    d->input->close();
+                    d->input.clear();
+                }
+                d->input = ioToKeep;
+                d->audioOutput->play();
 
-            if ( !preload )
+                if ( TomahawkSettings::instance()->privateListeningMode() != TomahawkSettings::FullyPrivate )
+                {
+                    d->currentTrack->track()->startPlaying();
+                }
+
                 sendNowPlayingNotification( Tomahawk::InfoSystem::InfoNowPlaying );
+            }
         }
     }
 
@@ -885,11 +916,12 @@ AudioEngine::loadPreviousTrack()
 
 
 void
-AudioEngine::loadNextTrack()
+AudioEngine::loadNextTrack( bool preload )
 {
     if ( QThread::currentThread() != thread() )
     {
-        QMetaObject::invokeMethod( this, "loadNextTrack", Qt::QueuedConnection );
+        QMetaObject::invokeMethod( this, "loadNextTrack", Qt::QueuedConnection,
+                Q_ARG( bool, preload ));
         return;
     }
 
@@ -903,8 +935,11 @@ AudioEngine::loadNextTrack()
     {
         if ( d->stopAfterTrack->track()->equals( d->currentTrack->track() ) )
         {
-            d->stopAfterTrack.clear();
-            stop();
+            if ( !preload )
+            {
+                d->stopAfterTrack.clear();
+                stop();
+            }
             return;
         }
     }
@@ -922,17 +957,24 @@ AudioEngine::loadNextTrack()
 
         if ( d->playlist.data()->nextResult() )
         {
-            result = d->playlist.data()->setSiblingResult( 1 );
-            setCurrentTrackPlaylist( d->playlist );
+            if ( preload )
+            {
+                result = d->playlist.data()->nextResult();
+            }
+            else
+            {
+                result = d->playlist.data()->setSiblingResult( 1 );
+                setCurrentTrackPlaylist( d->playlist );
+            }
         }
     }
 
     if ( result )
     {
-        tDebug( LOGVERBOSE ) << Q_FUNC_INFO << "Got next item, loading track";
-        loadTrack( result, false );
+        tDebug( LOGVERBOSE ) << Q_FUNC_INFO << "Got next item, loading track, preload:" << preload;
+        loadTrack( result, preload );
     }
-    else
+    else if ( !preload )
     {
         if ( !d->playlist.isNull() && d->playlist.data()->retryMode() == Tomahawk::PlaylistModes::Retry )
             d->waitingOnNewTrack = true;

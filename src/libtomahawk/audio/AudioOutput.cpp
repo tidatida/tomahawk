@@ -237,10 +237,6 @@ void AudioOutput::switchToPreloadedMedia( void )
             libvlc_event_attach( manager, events[ i ], &AudioOutput::vlcEventCallback, this );
         }
     }
-
-    //Clear preloaded
-    m_preloadedStream = nullptr;
-    m_vlcPreloadedMedia = nullptr;
 }
 
 AudioOutput::~AudioOutput()

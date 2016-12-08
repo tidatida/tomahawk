@@ -190,7 +190,7 @@ private slots:
     void performLoadIODevice( const Tomahawk::result_ptr& result, const QString& url, bool preload ); //only call from loadTrack kthxbi
     void performLoadTrack( const Tomahawk::result_ptr result, const QString& url, QSharedPointer< QIODevice > io, bool preload ); //only call from loadTrack or performLoadIODevice kthxbi
     void loadPreviousTrack();
-    void loadNextTrack();
+    void loadNextTrack(bool preload = false);
 
     void onVolumeChanged( qreal volume );
     void timerTriggered( qint64 time );
